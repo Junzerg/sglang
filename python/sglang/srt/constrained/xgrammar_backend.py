@@ -13,6 +13,7 @@
 # ==============================================================================
 """Constrained decoding with xgrammar backend."""
 
+import dataclasses
 import json
 import logging
 from typing import List, Optional, Tuple, Union
@@ -31,6 +32,7 @@ from sglang.srt.constrained.base_grammar_backend import (
     INVALID_GRAMMAR_OBJ,
     BaseGrammarBackend,
     BaseGrammarObject,
+    GrammarStats,
 )
 from sglang.srt.utils import is_hip
 
@@ -41,10 +43,11 @@ else:
     from sglang.srt.constrained.triton_ops.bitmask_ops import (
         apply_token_bitmask_inplace_triton,
     )
+
+
 logger = logging.getLogger(__name__)
-
-
 MAX_ROLLBACK_TOKENS = 200
+XGRAMMAR_SPECIAL_TOKEN_TEMPLATE = "<|xg_special_token_{}|>"
 
 
 class XGrammarGrammar(BaseGrammarObject):
@@ -56,17 +59,21 @@ class XGrammarGrammar(BaseGrammarObject):
         ctx: CompiledGrammar,
         override_stop_tokens: Optional[Union[List[int], int]],
         key_string: Optional[str] = None,  # TODO (sk): for debugging, remove later
+        grammar_stats: Optional[GrammarStats] = GrammarStats(),
     ) -> None:
+        super().__init__()
+
         self.matcher = matcher
         self.vocab_size = vocab_size
         self.ctx = ctx
         self.override_stop_tokens = override_stop_tokens
-        self.finished = False
         self.accepted_tokens = []
         self.key_string = key_string
+        self.grammar_stats = grammar_stats
 
     def accept_token(self, token: int):
         if not self.is_terminated():
+            self.current_token = token
             accepted = self.matcher.accept_token(token)
             if not accepted:
                 # log for debugging
@@ -120,6 +127,9 @@ class XGrammarGrammar(BaseGrammarObject):
             self.ctx,
             self.override_stop_tokens,
             self.key_string,
+            dataclasses.replace(
+                self.grammar_stats, is_cache_hit=True, tree_traversal_time=[]
+            ),
         )
 
     def try_jump_forward(self, tokenizer) -> Optional[Tuple[List[int], str]]:
@@ -150,7 +160,7 @@ class XGrammarGrammar(BaseGrammarObject):
             assert self.matcher.accept_token(new_output_ids[i])
 
     def __repr__(self):
-        return f"XGrammarGrammar({self.key_string=}, {self.accepted_tokens=})"
+        return f"XGrammarGrammar({self.key_string=}, {self.accepted_tokens=}, {self.current_token=})"
 
 
 class XGrammarGrammarBackend(BaseGrammarBackend):
@@ -177,15 +187,26 @@ class XGrammarGrammarBackend(BaseGrammarBackend):
         self.vocab_size = vocab_size
         self.override_stop_tokens = override_stop_tokens
 
-    def _from_context(self, ctx: CompiledGrammar, key_string: str) -> XGrammarGrammar:
+    def _from_context(
+        self, ctx: CompiledGrammar, key_string: str, grammar_stats: GrammarStats
+    ) -> XGrammarGrammar:
         matcher = GrammarMatcher(
             ctx,
             max_rollback_tokens=MAX_ROLLBACK_TOKENS,
             override_stop_tokens=self.override_stop_tokens,
         )
         return XGrammarGrammar(
-            matcher, self.vocab_size, ctx, self.override_stop_tokens, key_string
+            matcher,
+            self.vocab_size,
+            ctx,
+            self.override_stop_tokens,
+            key_string,
+            grammar_stats,
         )
+
+    # A rough estimation of # of production rules in EBNFs
+    def _get_ebnf_size(self, ebnf):
+        return sum([len(prod.split(" | ")) for prod in ebnf.strip().split("\n")])
 
     def dispatch_json(self, key_string: str) -> Optional[XGrammarGrammar]:
         try:
@@ -195,26 +216,29 @@ class XGrammarGrammarBackend(BaseGrammarBackend):
             else:
                 ctx = self.grammar_compiler.compile_json_schema(schema=key_string)
 
+            grammar_stats = GrammarStats(schema_count=1, ebnf_size=0)
         except (RuntimeError, json.decoder.JSONDecodeError) as e:
             logging.error(f"Hit invalid json_schema: {key_string=}, {e=}")
             return INVALID_GRAMMAR_OBJ
-        return self._from_context(ctx, key_string)
+        return self._from_context(ctx, key_string, grammar_stats)
 
     def dispatch_ebnf(self, key_string: str) -> Optional[XGrammarGrammar]:
         try:
             ctx = self.grammar_compiler.compile_grammar(key_string)
+            grammar_stats = GrammarStats(ebnf_size=0)
         except RuntimeError as e:
             logging.error(f"Hit invalid ebnf: {key_string=}, {e=}")
             return INVALID_GRAMMAR_OBJ
-        return self._from_context(ctx, key_string)
+        return self._from_context(ctx, key_string, grammar_stats)
 
     def dispatch_regex(self, key_string: str) -> Optional[XGrammarGrammar]:
         try:
             ctx = self.grammar_compiler.compile_regex(key_string)
+            grammar_stats = GrammarStats(ebnf_size=0)
         except RuntimeError as e:
             logging.error(f"Hit invalid regex: {key_string=}, {e=}")
             return INVALID_GRAMMAR_OBJ
-        return self._from_context(ctx, key_string)
+        return self._from_context(ctx, key_string, grammar_stats)
 
     def dispatch_structural_tag(self, key_string: str) -> Optional[XGrammarGrammar]:
         try:
@@ -230,10 +254,11 @@ class XGrammarGrammarBackend(BaseGrammarBackend):
             ctx = self.grammar_compiler.compile_structural_tag(
                 tags, structural_tag["triggers"]
             )
+            grammar_stats = GrammarStats(schema_count=1, ebnf_size=0)
         except (RuntimeError, json.decoder.JSONDecodeError) as e:
             logging.error(f"Hit invalid structural_tag: {key_string=}, {e=}")
             return INVALID_GRAMMAR_OBJ
-        return self._from_context(ctx, key_string)
+        return self._from_context(ctx, key_string, grammar_stats)
 
     def reset(self):
         self.grammar_compiler.clear_cache()

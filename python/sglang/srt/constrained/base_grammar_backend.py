@@ -14,8 +14,9 @@
 """The baseclass of a backend for grammar-guided constrained decoding."""
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Event
 from typing import Dict, List, Optional, Tuple
 
@@ -26,10 +27,22 @@ from sglang.srt.server_args import ServerArgs
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class GrammarStats:
+    compilation_time: Optional[float] = None
+    schema_count: Optional[int] = None
+    ebnf_size: Optional[int] = None
+    is_cache_hit: bool = False
+    is_grammar_aborted: bool = False
+    tree_traversal_time: List[float] = field(default_factory=list)
+
+
 class BaseGrammarObject:
 
     def __init__(self):
-        self._finished = False
+        self.finished = False
+        self.grammar_stats = None
+        self.current_token = None
 
     def accept_token(self, token: int) -> None:
         """
@@ -61,14 +74,6 @@ class BaseGrammarObject:
 
     def copy(self) -> "BaseGrammarObject":
         return self
-
-    @property
-    def finished(self):
-        return self._finished
-
-    @finished.setter
-    def finished(self, finished):
-        self._finished = finished
 
     def try_jump_forward(self, tokenizer) -> Optional[Tuple[List[int], str]]:
         """
@@ -137,19 +142,24 @@ class BaseGrammarBackend:
         return self._not_supported("structural_tag", key_string)
 
     def _init_value_dispatch(self, key: Tuple[str, str]) -> Optional[BaseGrammarObject]:
+        s = time.time()
         key_type, key_string = key
         if key_type == "json":
-            return self.dispatch_json(key_string)
+            grammar = self.dispatch_json(key_string)
         elif key_type == "regex":
-            return self.dispatch_regex(key_string)
+            grammar = self.dispatch_regex(key_string)
         elif key_type == "ebnf":
-            return self.dispatch_ebnf(key_string)
+            grammar = self.dispatch_ebnf(key_string)
         elif key_type == "structural_tag":
-            return self.dispatch_structural_tag(key_string)
+            grammar = self.dispatch_structural_tag(key_string)
         elif key_type == "structural_pattern":
-            return self.dispatch_structural_pattern(key_string)
+            grammar = self.dispatch_structural_pattern(key_string)
         else:
-            return self.dispatch_fallback(key_type, key_string)
+            grammar = self.dispatch_fallback(key_type, key_string)
+
+        if grammar is not None:
+            grammar.grammar_stats.compilation_time = time.time() - s
+        return grammar
 
     def get_cached_or_future_value(
         self, key: Tuple[str, str]
