@@ -15,6 +15,7 @@ pub mod factory;
 pub mod grpc;
 pub mod header_utils;
 pub mod http;
+pub mod router_manager;
 
 pub use factory::RouterFactory;
 
