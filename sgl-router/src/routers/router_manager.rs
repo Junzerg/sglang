@@ -43,6 +43,9 @@ pub struct RouterManager {
     /// Worker registry (single source of truth in multi-router mode)
     worker_registry: Arc<WorkerRegistry>,
 
+    /// Policy registry for managing model-to-policy mappings
+    policy_registry: Arc<crate::policies::PolicyRegistry>,
+
     /// All routers managed by this manager (max 4 routers in Phase 2)
     /// RouterId examples: "http-regular", "http-pd", "grpc-regular", "grpc-pd"
     routers: Arc<DashMap<RouterId, Arc<dyn RouterTrait>>>,
@@ -63,10 +66,16 @@ pub struct RouterManager {
 }
 
 impl RouterManager {
-    /// Create a new router manager
-    pub fn new(config: RouterConfig, client: reqwest::Client) -> Self {
+    /// Create a new router manager with shared registries
+    pub fn new(
+        config: RouterConfig,
+        client: reqwest::Client,
+        worker_registry: Arc<WorkerRegistry>,
+        policy_registry: Arc<crate::policies::PolicyRegistry>,
+    ) -> Self {
         Self {
-            worker_registry: Arc::new(WorkerRegistry::new()),
+            worker_registry,
+            policy_registry,
             routers: Arc::new(DashMap::new()),
             default_router: None,
             model_routers: Arc::new(DashMap::new()),
@@ -223,11 +232,17 @@ impl RouterManager {
         // Register worker
         let worker_id = self.worker_registry.register(Arc::from(worker));
 
+        // Notify PolicyRegistry about the new worker
+        // Extract policy hint from labels if provided
+        let policy_hint = labels.get("policy").map(|s| s.as_str());
+        let policy = self.policy_registry.on_worker_added(&model_id, policy_hint);
+
         info!(
-            "Added worker {} with URL {} for model {}",
+            "Added worker {} with URL {} for model {} using policy {}",
             worker_id.as_str(),
             config.url,
-            model_id
+            model_id,
+            policy.name()
         );
 
         // Return worker info
@@ -243,8 +258,21 @@ impl RouterManager {
 
     /// Remove a worker from the registry
     pub fn remove_worker(&self, url: &str) -> Result<WorkerApiResponse, WorkerErrorResponse> {
+        // Get worker to extract model_id before removing
+        let model_id = self
+            .worker_registry
+            .get_by_url(url)
+            .map(|worker| worker.model_id().to_string());
+
         if let Some(_worker) = self.worker_registry.remove_by_url(url) {
-            info!("Removed worker with URL {}", url);
+            // Notify PolicyRegistry about worker removal
+            if let Some(model_id) = model_id {
+                self.policy_registry.on_worker_removed(&model_id);
+                info!("Removed worker with URL {} for model {}", url, model_id);
+            } else {
+                info!("Removed worker with URL {}", url);
+            }
+
             Ok(WorkerApiResponse {
                 success: true,
                 message: format!("Worker {} removed successfully", url),
@@ -553,13 +581,15 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &GenerateRequest,
+        _model_id: Option<&str>,
     ) -> Response {
         // Select router based on headers
         // GenerateRequest doesn't have a model field
         let router = self.select_router_for_request(headers, None);
 
         if let Some(router) = router {
-            router.route_generate(headers, body).await
+            // In multi-model mode, pass None since GenerateRequest doesn't have model field
+            router.route_generate(headers, body, None).await
         } else {
             // Return 404 when no router is available for the request
             (
@@ -575,12 +605,14 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
+        _model_id: Option<&str>,
     ) -> Response {
         // Select router based on headers and model
         let router = self.select_router_for_request(headers, Some(&body.model));
 
         if let Some(router) = router {
-            router.route_chat(headers, body).await
+            // In multi-model mode, pass the model_id to the router
+            router.route_chat(headers, body, Some(&body.model)).await
         } else {
             // Return 404 when the specified model is not found
             (
@@ -596,12 +628,16 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &CompletionRequest,
+        _model_id: Option<&str>,
     ) -> Response {
         // Select router based on headers and model
         let router = self.select_router_for_request(headers, Some(&body.model));
 
         if let Some(router) = router {
-            router.route_completion(headers, body).await
+            // In multi-model mode, pass the model_id to the router
+            router
+                .route_completion(headers, body, Some(&body.model))
+                .await
         } else {
             // Return 404 when the specified model is not found
             (

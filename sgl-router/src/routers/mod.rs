@@ -60,14 +60,19 @@ pub trait RouterTrait: Send + Sync + Debug + WorkerManagement {
     async fn get_model_info(&self, req: Request<Body>) -> Response;
 
     /// Route a generate request
-    async fn route_generate(&self, headers: Option<&HeaderMap>, body: &GenerateRequest)
-        -> Response;
+    async fn route_generate(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &GenerateRequest,
+        model_id: Option<&str>,
+    ) -> Response;
 
     /// Route a chat completion request
     async fn route_chat(
         &self,
         headers: Option<&HeaderMap>,
         body: &ChatCompletionRequest,
+        model_id: Option<&str>,
     ) -> Response;
 
     /// Route a completion request
@@ -75,6 +80,7 @@ pub trait RouterTrait: Send + Sync + Debug + WorkerManagement {
         &self,
         headers: Option<&HeaderMap>,
         body: &CompletionRequest,
+        model_id: Option<&str>,
     ) -> Response;
 
     async fn route_embeddings(&self, headers: Option<&HeaderMap>, body: Body) -> Response;
