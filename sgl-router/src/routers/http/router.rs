@@ -1,7 +1,7 @@
 use crate::config::types::RetryConfig;
 use crate::core::{
-    is_retryable_status, BasicWorker, CircuitBreakerConfig, HealthChecker, HealthConfig,
-    RetryExecutor, Worker, WorkerRegistry, WorkerType,
+    is_retryable_status, BasicWorker, CircuitBreakerConfig, HealthConfig, RetryExecutor, Worker,
+    WorkerRegistry, WorkerType,
 };
 use crate::metrics::RouterMetrics;
 use crate::policies::{LoadBalancingPolicy, PolicyRegistry};
@@ -41,7 +41,6 @@ pub struct Router {
     circuit_breaker_config: CircuitBreakerConfig,
     _worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
     _load_monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
-    _health_checker: Option<HealthChecker>,
 }
 
 impl Router {
@@ -108,8 +107,7 @@ impl Router {
         }
 
         // TODO Start health checker for workers in registry
-        // Note: This might need to be moved to a central location if multiple routers share the registry
-        let health_checker = None; // Health checking should be centralized in the registry
+        // Health checking is centralized in the WorkerRegistry
 
         // Setup load monitoring for PowerOfTwo policy
         let (tx, rx) = tokio::sync::watch::channel(HashMap::new());
@@ -150,7 +148,6 @@ impl Router {
             circuit_breaker_config: core_cb_config,
             _worker_loads: worker_loads,
             _load_monitor_handle: load_monitor_handle,
-            _health_checker: health_checker,
         })
     }
 
@@ -1372,7 +1369,6 @@ mod tests {
             circuit_breaker_config: CircuitBreakerConfig::default(),
             _worker_loads: Arc::new(rx),
             _load_monitor_handle: None,
-            _health_checker: None,
         }
     }
 
